@@ -18,6 +18,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use crate::datasource::file_format::arrow::try_new_record_batch_reader;
 use crate::datasource::physical_plan::{FileOpenFuture, FileOpener};
 use crate::error::Result;
 use datafusion_datasource::as_file_source;
@@ -135,22 +136,21 @@ impl FileOpener for ArrowOpener {
                     match r.payload {
                         #[cfg(not(target_arch = "wasm32"))]
                         GetResultPayload::File(file, _) => {
-                            let arrow_reader = arrow::ipc::reader::FileReader::try_new(
-                                file, projection,
-                            )?;
-                            Ok(futures::stream::iter(arrow_reader)
-                                .map(|r| r.map_err(Into::into))
-                                .boxed())
+                            Ok(futures::stream::iter(try_new_record_batch_reader(
+                                file.try_clone()?,
+                                projection.clone(),
+                            )?)
+                            .map(|r| r.map_err(Into::into))
+                            .boxed())
                         }
                         GetResultPayload::Stream(_) => {
                             let bytes = r.bytes().await?;
                             let cursor = std::io::Cursor::new(bytes);
-                            let arrow_reader = arrow::ipc::reader::FileReader::try_new(
+                            Ok(futures::stream::iter(try_new_record_batch_reader(
                                 cursor, projection,
-                            )?;
-                            Ok(futures::stream::iter(arrow_reader)
-                                .map(|r| r.map_err(Into::into))
-                                .boxed())
+                            )?)
+                            .map(|r| r.map_err(Into::into))
+                            .boxed())
                         }
                     }
                 }
