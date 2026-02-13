@@ -77,6 +77,7 @@ datafusion-functions-aggregate = { workspace = true }
 datafusion-functions-window = { workspace = true }
 insta = { workspace = true }
 rand = { workspace = true }
+rand_distr = "0.5"
 rstest = { workspace = true }
 rstest_reuse = "0.7.0"
 tokio = { workspace = true, features = [
