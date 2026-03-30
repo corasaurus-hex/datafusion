@@ -93,11 +93,93 @@ impl<T: CursorValues> Cursor<T> {
         self.offset == self.values.len()
     }
 
+    /// Returns the number of remaining rows in this cursor
+    pub fn remaining(&self) -> usize {
+        self.values.len() - self.offset
+    }
+
     /// Advance the cursor, returning the previous row index
     pub fn advance(&mut self) -> usize {
         let t = self.offset;
         self.offset += 1;
         t
+    }
+
+    /// Advance the cursor by `n` rows
+    pub fn advance_by(&mut self, n: usize) {
+        debug_assert!(self.offset + n <= self.values.len());
+        self.offset += n;
+    }
+
+    /// Count how many consecutive rows starting from the current offset
+    /// are strictly less than `other`'s current value, up to `max` rows.
+    ///
+    /// Uses a galloping search: probe at exponentially increasing offsets
+    /// (1, 2, 4, 8, ...) until finding a row >= other, then binary search
+    /// within the last interval. O(log n) comparisons for runs of length n,
+    /// where n is the actual run length (not the search space).
+    pub fn count_lt(&self, other: &Self, max: usize) -> usize {
+        let limit = max.min(self.remaining());
+        if limit == 0 {
+            return 0;
+        }
+
+        // check index 0 explicitly — gallop starts at probe=1
+        if !T::compare(&self.values, self.offset, &other.values, other.offset).is_lt() {
+            return 0;
+        }
+        if limit == 1 {
+            return 1;
+        }
+
+        // gallop: probe at 1, 2, 4, 8, ... until we find a non-lt value
+        let mut prev = 0;
+        let mut probe = 1;
+        while probe < limit {
+            if !T::compare(
+                &self.values,
+                self.offset + probe,
+                &other.values,
+                other.offset,
+            )
+            .is_lt()
+            {
+                return self.binary_search_lt(other, prev, probe);
+            }
+            prev = probe;
+            probe = (probe << 1).min(limit);
+        }
+
+        // probed to the limit — check if everything qualifies
+        if prev < limit
+            && !T::compare(
+                &self.values,
+                self.offset + limit - 1,
+                &other.values,
+                other.offset,
+            )
+            .is_lt()
+        {
+            return self.binary_search_lt(other, prev, limit - 1);
+        }
+        limit
+    }
+
+    /// Binary search within [lo, hi] for the first index where
+    /// self[offset + idx] >= other. Returns that index.
+    /// Invariant: self[offset + lo] < other, self[offset + hi] >= other.
+    fn binary_search_lt(&self, other: &Self, mut lo: usize, mut hi: usize) -> usize {
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if T::compare(&self.values, self.offset + mid, &other.values, other.offset)
+                .is_lt()
+            {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        hi
     }
 
     pub fn is_eq_to_prev_one(&self, prev_cursor: Option<&Cursor<T>>) -> bool {

@@ -99,6 +99,10 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     /// been updated
     loser_tree_adjusted: bool,
 
+    /// The stream index that won the previous loser tree evaluation,
+    /// used to detect consecutive wins for cascade optimization.
+    prev_winner: usize,
+
     /// Target batch size
     batch_size: usize,
 
@@ -181,6 +185,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             poll_reset_epochs: vec![0; stream_count],
             loser_tree: vec![],
             loser_tree_adjusted: false,
+            prev_winner: usize::MAX,
             batch_size,
             fetch,
             produced: 0,
@@ -302,8 +307,34 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             }
 
             let stream_idx = self.loser_tree[0];
+
+            // cascade: if the same stream won twice in a row, try to
+            // consume a run of consecutive rows that beat the runner-up.
+            // this avoids O(log N) tree updates per row within the run.
+            // poll counts not updated: cascade only consumes strictly-less
+            // rows, so round-robin tie-breaker state is unaffected.
+            if stream_idx == self.prev_winner {
+                let cascade_len = self.compute_cascade_len(stream_idx);
+                if cascade_len > 0 {
+                    self.in_progress.push_run(stream_idx, cascade_len);
+                    self.advance_cursor_by(stream_idx, cascade_len);
+                    self.loser_tree_adjusted = false;
+                    self.prev_winner = usize::MAX;
+                    if self.fetch_reached() {
+                        self.done = true;
+                    } else if self.in_progress.len() < self.batch_size {
+                        continue;
+                    }
+                    self.produced += self.in_progress.len();
+                    return Poll::Ready(
+                        self.in_progress.build_record_batch().transpose(),
+                    );
+                }
+            }
+
             if self.advance_cursors(stream_idx) {
                 self.loser_tree_adjusted = false;
+                self.prev_winner = stream_idx;
                 self.in_progress.push_row(stream_idx);
 
                 // stop sorting if fetch has been reached
@@ -316,6 +347,65 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             }
 
             return Poll::Ready(self.emit_in_progress_batch().transpose());
+        }
+    }
+
+    /// Compute how many additional consecutive rows from `stream_idx` are
+    /// strictly less than the runner-up. Only called after a fresh
+    /// `update_loser_tree` when the same stream won consecutively.
+    ///
+    /// The true runner-up is the minimum cursor among all losers along
+    /// the winner's leaf-to-root path in the loser tree (not just
+    /// `loser_tree[1]`, which is only the loser of the final match).
+    fn compute_cascade_len(&self, stream_idx: usize) -> usize {
+        let winner_cursor = match &self.cursors[stream_idx] {
+            Some(c) => c,
+            None => return 0,
+        };
+        let mut max = self.batch_size.saturating_sub(self.in_progress.len());
+        if let Some(fetch) = self.fetch {
+            let remaining = fetch.saturating_sub(self.produced + self.in_progress.len());
+            max = max.min(remaining);
+        }
+        if max == 0 {
+            return 0;
+        }
+
+        // walk the winner's leaf-to-root path to find the true runner-up
+        let mut runner_up_idx: Option<usize> = None;
+        let mut node = self.lt_leaf_node_index(stream_idx);
+        while node > 0 {
+            let loser = self.loser_tree[node];
+            runner_up_idx = Some(match runner_up_idx {
+                None => loser,
+                Some(prev) => {
+                    if self.is_gt(prev, loser) {
+                        loser
+                    } else {
+                        prev
+                    }
+                }
+            });
+            node = self.lt_parent_node_index(node);
+        }
+
+        match runner_up_idx {
+            Some(idx) => match &self.cursors[idx] {
+                Some(runner_up) => winner_cursor.count_lt(runner_up, max),
+                None => winner_cursor.remaining().min(max),
+            },
+            // single stream, no runner-up
+            None => winner_cursor.remaining().min(max),
+        }
+    }
+
+    /// Advance cursor by `n` rows, updating prev_cursors if exhausted
+    fn advance_cursor_by(&mut self, stream_idx: usize, n: usize) {
+        if let Some(cursor) = &mut self.cursors[stream_idx] {
+            cursor.advance_by(n);
+            if cursor.is_finished() {
+                self.prev_cursors[stream_idx] = self.cursors[stream_idx].take();
+            }
         }
     }
 
@@ -543,6 +633,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             } else if self.is_gt(winner, challenger) {
                 self.update_winner(cmp_node, &mut winner, challenger);
             }
+
             cmp_node = self.lt_parent_node_index(cmp_node);
         }
         self.loser_tree[0] = winner;

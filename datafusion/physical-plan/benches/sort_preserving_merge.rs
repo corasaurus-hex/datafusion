@@ -305,7 +305,7 @@ fn get_bench_data() -> Vec<BenchData> {
     // 7. u64 geometric runs — realistic variable-length runs (10M rows)
     // median_run=10: mostly short runs (1-30), occasional longer
     // median_run=100: medium runs with wider spread
-    for median_run in [10, 100] {
+    for median_run in [1, 10, 100] {
         let partitions = generate_geometric_runs_u64(3, BENCH_ROWS_U64, median_run);
         push_bench_data(
             &format!("u64_geometric_runs_median_{median_run}"),

@@ -17,13 +17,14 @@
 
 use crate::spill::get_record_batch_memory_size;
 use arrow::array::ArrayRef;
-use arrow::compute::interleave;
+use arrow::compute::interleave_ranges;
 use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_execution::memory_pool::MemoryReservation;
 use log::warn;
+use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -64,9 +65,12 @@ pub struct BatchBuilder {
     /// The current [`BatchCursor`] for each stream
     cursors: Vec<BatchCursor>,
 
-    /// The accumulated stream indexes from which to pull rows
-    /// Consists of a tuple of `(batch_idx, row_idx)`
-    indices: Vec<(usize, usize)>,
+    /// Accumulated row ranges to pull, as `(batch_idx, row_range)`.
+    /// Consecutive rows from the same batch are coalesced into a single range.
+    ranges: Vec<(usize, Range<usize>)>,
+
+    /// Total number of rows across all ranges
+    row_count: usize,
 }
 
 impl BatchBuilder {
@@ -82,7 +86,8 @@ impl BatchBuilder {
             schema,
             batches: Vec::with_capacity(stream_count * 2),
             cursors: vec![BatchCursor::default(); stream_count],
-            indices: Vec::with_capacity(batch_size),
+            ranges: Vec::with_capacity(batch_size),
+            row_count: 0,
             reservation,
             batches_mem_used: 0,
             initial_reservation,
@@ -109,19 +114,47 @@ impl BatchBuilder {
     /// Append the next row from `stream_idx`
     pub fn push_row(&mut self, stream_idx: usize) {
         let cursor = &mut self.cursors[stream_idx];
+        let batch_idx = cursor.batch_idx;
         let row_idx = cursor.row_idx;
         cursor.row_idx += 1;
-        self.indices.push((cursor.batch_idx, row_idx));
+        self.row_count += 1;
+
+        // extend the last range if this row is contiguous
+        if let Some(last) = self.ranges.last_mut() {
+            if last.0 == batch_idx && last.1.end == row_idx {
+                last.1.end += 1;
+                return;
+            }
+        }
+        self.ranges.push((batch_idx, row_idx..row_idx + 1));
+    }
+
+    /// Push `count` consecutive rows starting from the current position in `stream_idx`
+    pub fn push_run(&mut self, stream_idx: usize, count: usize) {
+        let cursor = &mut self.cursors[stream_idx];
+        let batch_idx = cursor.batch_idx;
+        let start_row = cursor.row_idx;
+        cursor.row_idx += count;
+        self.row_count += count;
+
+        // extend the last range if contiguous
+        if let Some(last) = self.ranges.last_mut() {
+            if last.0 == batch_idx && last.1.end == start_row {
+                last.1.end += count;
+                return;
+            }
+        }
+        self.ranges.push((batch_idx, start_row..start_row + count));
     }
 
     /// Returns the number of in-progress rows in this [`BatchBuilder`]
     pub fn len(&self) -> usize {
-        self.indices.len()
+        self.row_count
     }
 
     /// Returns `true` if this [`BatchBuilder`] contains no in-progress rows
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.row_count == 0
     }
 
     /// Returns the schema of this [`BatchBuilder`]
@@ -129,10 +162,33 @@ impl BatchBuilder {
         &self.schema
     }
 
-    /// Try to interleave all columns using the given index slice.
+    /// Build a range prefix covering the first `rows_to_emit` rows.
+    fn prefix_ranges(&self, rows_to_emit: usize) -> Vec<(usize, Range<usize>)> {
+        let mut remaining = rows_to_emit;
+        let mut prefix = Vec::new();
+
+        for (batch_idx, range) in &self.ranges {
+            if remaining == 0 {
+                break;
+            }
+
+            let len = range.len();
+            if len <= remaining {
+                prefix.push((*batch_idx, range.clone()));
+                remaining -= len;
+            } else {
+                prefix.push((*batch_idx, range.start..range.start + remaining));
+                break;
+            }
+        }
+
+        prefix
+    }
+
+    /// Try to interleave all columns using the given range slice.
     fn try_interleave_columns(
         &self,
-        indices: &[(usize, usize)],
+        ranges: &[(usize, Range<usize>)],
     ) -> Result<Vec<ArrayRef>> {
         (0..self.schema.fields.len())
             .map(|column_idx| {
@@ -141,9 +197,7 @@ impl BatchBuilder {
                     .iter()
                     .map(|(_, batch)| batch.column(column_idx).as_ref())
                     .collect();
-                // Arrow 58.1.0+ returns OffsetOverflowError directly from
-                // interleave, allowing retry_interleave to shrink the batch.
-                interleave(&arrays, indices).map_err(Into::into)
+                Ok(interleave_ranges(&arrays, ranges)?)
             })
             .collect::<Result<Vec<_>>>()
     }
@@ -154,16 +208,37 @@ impl BatchBuilder {
         rows_to_emit: usize,
         columns: Vec<ArrayRef>,
     ) -> Result<RecordBatch> {
-        // Remove consumed indices, keeping any remaining for the next call.
-        self.indices.drain(..rows_to_emit);
+        let mut remaining = rows_to_emit;
+        let mut drop_prefix = 0;
 
-        // Only clean up fully-consumed batches when all indices are drained,
-        // because remaining indices may still reference earlier batches.
+        while let Some((_, range)) = self.ranges.get(drop_prefix) {
+            if remaining == 0 {
+                break;
+            }
+
+            let len = range.len();
+            if len <= remaining {
+                remaining -= len;
+                drop_prefix += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.ranges.drain(..drop_prefix);
+        if remaining > 0 {
+            let (_, range) = &mut self.ranges[0];
+            range.start += remaining;
+        }
+        self.row_count -= rows_to_emit;
+
+        // Only clean up fully-consumed batches when all ranges are drained,
+        // because remaining ranges may still reference earlier batches.
         // In the overflow/partial-emit case this may retain some extra memory
-        // across a few drain polls, but avoids costly index scanning on the
+        // across a few drain polls, but avoids costly range scanning on the
         // hot path. The retention is bounded and short-lived since leftover
         // rows are drained over subsequent polls.
-        if self.indices.is_empty() {
+        if self.ranges.is_empty() {
             // New cursors are only created once the previous cursor for the stream
             // is finished. This means all remaining rows from all but the last batch
             // for each stream have been yielded to the newly created record batch
@@ -210,8 +285,9 @@ impl BatchBuilder {
         }
 
         let (rows_to_emit, columns) =
-            retry_interleave(self.indices.len(), self.indices.len(), |rows_to_emit| {
-                self.try_interleave_columns(&self.indices[..rows_to_emit])
+            retry_interleave(self.row_count, self.row_count, |rows_to_emit| {
+                let ranges = self.prefix_ranges(rows_to_emit);
+                self.try_interleave_columns(&ranges)
             })?;
 
         Ok(Some(self.finish_record_batch(rows_to_emit, columns)?))
@@ -351,7 +427,7 @@ mod tests {
         builder.push_batch(0, batch).unwrap();
 
         let error = builder
-            .try_interleave_columns(&[(0, 0), (0, 0)])
+            .try_interleave_columns(&[(0, 0..1), (0, 0..1)])
             .unwrap_err();
 
         assert!(is_offset_overflow(&error));

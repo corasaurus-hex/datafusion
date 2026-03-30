@@ -284,3 +284,21 @@ debug = false
 debug-assertions = false
 strip = "debuginfo"
 incremental = false
+
+[patch.crates-io]
+arrow-arith = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-array = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-avro = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-buffer = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-cast = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-csv = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-data = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-flight = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-ipc = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-json = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-ord = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-row = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-schema = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-select = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow-string = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
+arrow = { git = "https://github.com/corasaurus-hex/arrow-rs", branch = "cs--interleave-ranges" }
