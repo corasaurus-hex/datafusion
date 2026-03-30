@@ -319,7 +319,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
                     self.in_progress.push_run(stream_idx, cascade_len);
                     self.advance_cursor_by(stream_idx, cascade_len);
                     self.loser_tree_adjusted = false;
-                    self.prev_winner = usize::MAX;
+                    self.prev_winner = stream_idx;
                     if self.fetch_reached() {
                         self.done = true;
                     } else if self.in_progress.len() < self.batch_size {
