@@ -120,11 +120,12 @@ impl BatchBuilder {
         self.row_count += 1;
 
         // extend the last range if this row is contiguous
-        if let Some(last) = self.ranges.last_mut() {
-            if last.0 == batch_idx && last.1.end == row_idx {
-                last.1.end += 1;
-                return;
-            }
+        if let Some(last) = self.ranges.last_mut()
+            && last.0 == batch_idx
+            && last.1.end == row_idx
+        {
+            last.1.end += 1;
+            return;
         }
         self.ranges.push((batch_idx, row_idx..row_idx + 1));
     }
@@ -138,11 +139,12 @@ impl BatchBuilder {
         self.row_count += count;
 
         // extend the last range if contiguous
-        if let Some(last) = self.ranges.last_mut() {
-            if last.0 == batch_idx && last.1.end == start_row {
-                last.1.end += count;
-                return;
-            }
+        if let Some(last) = self.ranges.last_mut()
+            && last.0 == batch_idx
+            && last.1.end == start_row
+        {
+            last.1.end += count;
+            return;
         }
         self.ranges.push((batch_idx, start_row..start_row + count));
     }
@@ -166,7 +168,6 @@ impl BatchBuilder {
     fn prefix_ranges(&self, rows_to_emit: usize) -> Vec<(usize, Range<usize>)> {
         let mut remaining = rows_to_emit;
         let mut prefix = Vec::new();
-
         for (batch_idx, range) in &self.ranges {
             if remaining == 0 {
                 break;
